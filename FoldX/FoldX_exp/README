@@ -1,0 +1,13 @@
+- structure can be heterodimer/trimer/...
+- fasta has to be singular 
+=> process needs to be redone for every polypeptide chain (not necessarily when pyFRESCO can be automated)
+- attention: all residue numbers will be based on the input fasta 
+- whatever is done to repair the pdb must not alter the aa sequence
+
+- oligomerize command maybe not necessary if users deoligomerizes during pdb reparation 
+
+- user input for which YASARA molecule is supposed to be aligned?
+
+Make sure molecules have distinguishable names 
+
+
