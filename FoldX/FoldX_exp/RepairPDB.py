@@ -203,5 +203,6 @@ best_per_fasta = get_alignment_info(fasta_seqs, pdb_seqs)
 
 reassign_pdb_residues(pdb, best_per_fasta)
 
-m
+print()
+
 
