@@ -238,12 +238,7 @@ def get_motifs(exp_data):
 #--------------------Compares motifs to sequence and calculates ddG of theoretical motif implementation at each position--------------------#
 
 def get_ddgs(alignment_tables, all_motifs, MutEnergyList):
-#output structure: 
 
-    #dictionary with list for every 7 mer, that contains information about the mutation, ddg and sd of every individual position 
-    ddg_per_mutation = {}                   
-    #dictionary with lists for every pos containing total ddg and sd for every 7mer 
-    ddg_per_position = {}
     #dictionary with dictionaries for every motif 
     ddg_per_motif = {}
     
@@ -253,21 +248,26 @@ def get_ddgs(alignment_tables, all_motifs, MutEnergyList):
         #makes a string out of the "pdb_seq" entries in the alignment table 
         pdb_seq = "".join(alignment_table["pdb_seq"].replace("", " ").fillna(" ").astype(str))
 
-        #iterates through list of experimetnally testes motifs
+        #iterates through list of experimentally testes motifs
         for motif, efficiency in all_motifs.items():
 
+            #dictionary with list for every 7 mer, that contains information about the mutation, ddg and sd of every individual position 
+            ddg_per_mutation = {}                   
+            #dictionary with lists for every pos containing total ddg and sd for every 7mer 
+            ddg_per_position = {}
+
             #iterates through positions of all possible 7mers
-            for pos in range(len(pdb_seq) - len(F1) + 1):
+            for pos in range(len(pdb_seq) - len(motif) + 1):
 
                 #defines the window for the current position 
-                window = pdb_seq[pos:pos+len(F1)]
+                window = pdb_seq[pos:pos+len(motif)]
 
                 #iterates through the positions of the current window
                 #counts and pairs the positions 
-                for i, (pbd_aa, motif_aa) in enumerate(zip(window, F1)):
+                for i, (pbd_aa, motif_aa) in enumerate(zip(window, motif)):
 
-                    #brings information of the mismatch into the format of the mutation that would need to happen to implement the motif 
-                    mut = f"{pbd_aa}{pos+i}{motif_aa}"
+                    #brings information of the mismatch into the format of the mutation in the FRESCO output
+                    mut = f"{pbd_aa}{pos+i+1}{motif_aa}"
 
                     #tests if all the current position of the window actually contains an aa
                     if pbd_aa == " ":
@@ -281,16 +281,19 @@ def get_ddgs(alignment_tables, all_motifs, MutEnergyList):
                         #list of lines in the MutationEnergiesList whose mutation equals "mut" (=> supposed to be one)
                         line_of_mut = MutEnergyList.loc[MutEnergyList["mutation"] == mut]
                         
+                        #checks if current mutation is listed in mutation energies list
+                        #breaks window loop if not 
                         if line_of_mut.empty:
-                            continue#raise value error 
-
+                            ddg_per_mutation.pop(pos, None)
+                            break
+                            
                         else:
 
                             #defines the current row of the first mutation match tha has been found in the list (it is only one match anyways)
                             row = line_of_mut.iloc[0]
 
                             #creates a new list everytime it runs through a new position iteration
-                            #then appends values from the MutationEnergiesList for every lower level iteration
+                            #then appends values from the MutationEnergiesList for the current mutation within the 7mer
                             ddg_per_mutation.setdefault(pos, []).append({
                                 "mutation": row["mutation"], 
                                 "ddG": float(row["ddG"]),
@@ -303,11 +306,12 @@ def get_ddgs(alignment_tables, all_motifs, MutEnergyList):
             #sums up the ddg + sd values of every 7mer and puts them into a dictionary
             #=> one dictionary for every motif
             for pos, mutations in ddg_per_mutation.items():
-
-                ddg_per_position.setdefault(pos, []).append({
+                
+                #pos+1 so that output shows biological residue number instead of position in python string
+                ddg_per_position[pos+1] = {
                     "ddG": round(sum(mut["ddG"] for mut in mutations), 4),
                     "sd": round(sum(mut["sd"] for mut in mutations), 4),
-                }) 
+                }
 
             #puts the dictionaries of all the motifs into one dictionary 
             ddg_per_motif[motif] = ddg_per_position

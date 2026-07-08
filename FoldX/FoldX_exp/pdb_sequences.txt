@@ -1,8 +1,12 @@
->Object 1 (4XHF_cleaned), Molecule 1
+>Object 1 (4XHF), Molecule A
 SLKERKLAKKRDELQRYVLMAADVNLGQGNEFRDIFAKSVKPLLINLDTGKVDSDANVLD
 FDERMAAINPETSSTPKKDIAKIKTRANDARVFKVFDDSGKLSSVVVPFYGKGLWSMIYG
 YVAVEPDFNTIKGVVVYEHGETPGIGDFVTDPHWLSLWKGKQLFDDKGKFAMRLVKGGVK
 EGDIHGVDAVSGATMTGRGVQRAMEFWFGVEGFQTFFNQLKAS
->Object 1 (4XHF_cleaned), Molecule 2
+>Object 1 (4XHF), Molecule A
 h
+>Object 1 (4XHF), Molecule A
+wwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwww
+wwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwww
+wwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwww
 
