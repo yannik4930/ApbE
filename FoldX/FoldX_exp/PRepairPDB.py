@@ -8,7 +8,7 @@ import yasara
 import re
 
 #general
-work_dir = Path("/Users/yannikmeindl/FoldX/FoldX_exp")
+work_dir = Path("/Users/yannikmeindl/ApbE/FoldX/FoldX_exp")
 F1 = "DGLSGAT"
 
 #get_fasta_seq
@@ -203,6 +203,6 @@ best_per_fasta = get_alignment_info(fasta_seqs, pdb_seqs)
 
 reassign_pdb_residues(pdb, best_per_fasta)
 
-print()
+
 
 
