@@ -34,6 +34,9 @@ pyfresco_dir.mkdir(exist_ok = True)
 far_enough_res = None
 far_enough_zone = None
 
+#switch for repair function 
+repair = True
+
 #open yasara in text mode (won't work on cluster otherwise)
 yasara.info.mode = "txt"
 
@@ -454,7 +457,7 @@ def get_ddgs(alignment_tables, all_motifs, MutEnergyList):
 
     return(ddg_per_motif)
 
-
+"""
 fasta_seqs = get_fasta_seq(fasta)
 
 pdb_seqs = get_pdb_seq(pdb)
@@ -462,15 +465,18 @@ pdb_seqs = get_pdb_seq(pdb)
 best_per_fasta = get_alignment_info(fasta_seqs, pdb_seqs)
 
 #PAth to pdb with reassigned residues
-#prepared_pdb = reassign_pdb_residues(pdb, best_per_fasta)
+prepared_pdb = reassign_pdb_residues(pdb, best_per_fasta)
 
-#repair_pdb(prepared_pdb)
+###argparse
+if repair = True:
+    repair_pdb(prepared_pdb)
 
-#prepaired_pdb = work_dir/f"{pdb.stem}_prepaired.pdb"
+    else:
+    continue
 
-#rawMutEnergyList = make_rawMutEnergyList(work_dir, pyfresco_dir, prepaired_pdb, foldx_path, far_enough_res, far_enough_zone)
+prepaired_pdb = work_dir/f"{pdb.stem}_prepaired.pdb"
 
-rawMutEnergyList = pyfresco_dir / "MutationEnergies_CompleteList.tab"
+rawMutEnergyList = make_rawMutEnergyList(work_dir, pyfresco_dir, prepaired_pdb, foldx_path, far_enough_res, far_enough_zone)
 
 MutEnergyList = get_MutEnergyList(rawMutEnergyList)
 
@@ -483,5 +489,10 @@ all_motifs = get_motifs(exp_data)
 
 ddg_per_motif = get_ddgs(alignment_tables, all_motifs, MutEnergyList)
 
+
 with open("ddg_per_motif.json", "w") as file:
     json.dump(ddg_per_motif, file, indent = 4)
+"""
+
+#best per position function 
+
