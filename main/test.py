@@ -20,15 +20,10 @@ import argparse
 BASE_DIR = Path(__file__).resolve().parent
 foldx_path = "/scratch/s6765211/FoldX/foldx5_Linux/foldx_20270131"
 
-#exp_data
-csv_file = BASE_DIR/"experimental_data.csv"
-
 #non-mutable region
 far_enough_res = None
 far_enough_zone = None
 
-#switch for repair function 
-repair = True
 
 #open yasara in text mode (won't work on cluster otherwise)
 yasara.info.mode = "txt"
@@ -257,7 +252,7 @@ def get_assessment_score(mismatch_dict, exp_data, position_scoring, recognition_
 
     for motif, mismatches_per_motif in mismatch_dict.items():
 
-        scored_motifs = []
+        scored_motifs = {}
         motif_length = len(motif)
 
         for mismatch_count, motif_hits in mismatches_per_motif.items():
@@ -322,90 +317,23 @@ def get_assessment_score(mismatch_dict, exp_data, position_scoring, recognition_
                     5,
                 )
 
-                scored_motifs.append((
-                    pos,
-                    window_sequence,
-                    rounded_assessment_score,
-                    mismatch_details,
-                ))
+                scored_motifs[pos] = {
+                    "Sequence Score": rounded_assessment_score,
+                    "MM": len(mismatch_details),
+                    "Window Sequence": window_sequence,
+                    "Mismatch Details": mismatch_details
+                }
 
         a_scores_per_motif[motif] = scored_motifs
 
     return a_scores_per_motif
 
 
-def get_confidence_score(a_scores_per_motif, exp_data, position_scoring, recognition_motif):
-
-    ac_scores_per_motif = {}
-
-    for motif, scored_motifs in a_scores_per_motif.items():
-
-        scored_motifs_2 = {}
-        motif_length = len(motif)
-
-        for (pos, window_sequence, assessment_score, mismatch_details) in scored_motifs:
-
-            confidence_score = (
-                motif_length - len(mismatch_details)
-            )
-
-            for motif_position, window_aa, motif_aa in mismatch_details:
-
-                f2_position = get_f2_position(
-                    motif_position,
-                    recognition_motif,
-                )
-
-                if f2_position is None:
-                    continue
-
-                if f2_position == 7:
-                    confidence_score += 1
-                    continue
-
-                mismatch = (
-                    f2_position,
-                    window_aa,
-                    motif_aa,
-                )
-
-                if mismatch in exp_data:
-
-                    confidence_score += 1
-
-                else:
-
-                    confidence_score += (
-                        position_scoring[f2_position]["R2"]
-                    )
-
-            normalized_confidence_score = (
-                confidence_score / motif_length
-            )
-
-            rounded_confidence_score = round(
-                normalized_confidence_score,
-                5,
-            )
-
-            scored_motifs_2[pos] = {
-                "Sequence Score": assessment_score,
-                "Confidence": rounded_confidence_score,
-                "MM": len(mismatch_details),
-                "Window Sequence": window_sequence,
-                "Details": mismatch_details,
-            }
-
-        ac_scores_per_motif[motif] = scored_motifs_2
-
-    return ac_scores_per_motif
-
-
-def make_SS_output_tables_per_motif(ac_scores_per_motif, output_mode):
+def make_SS_output_tables_per_motif(a_scores_per_motif, output_mode):
 
     SS_output_dict = {}
 
-    for motif, scores_per_motif in ac_scores_per_motif.items():
+    for motif, scores_per_motif in a_scores_per_motif.items():
 
         motif_scores = (
             pd.DataFrame.from_dict(
@@ -428,7 +356,7 @@ def make_SS_output_tables_per_motif(ac_scores_per_motif, output_mode):
         else:
             
             output_df = motif_scores[
-                ["Sequence Score", "Confidence", "MM", "Window Sequence"]
+                ["Sequence Score", "MM", "Window Sequence"]
             ]
 
         SS_output_dict[motif] = output_df
@@ -1013,7 +941,7 @@ def get_secstr_scores(simple_secstr_df, output_mode, recognition_motif):
     f2_offset = recognition_motif.index(f2_motif)
     essential_thr_index = f2_offset + 6
     beginning_of_allowed_aH = essential_thr_index - 1
-    end_of_allowed_bS = f2_offset + 1
+    end_of_allowed_bS = essential_thr_index - 5
 
     windows = []
     scores = {}
@@ -1415,10 +1343,7 @@ def parse_args():
 
 if __name__ == "__main__":
 
-    #pandas settings for data frames
-    pd.set_option("display.max_columns", None)
-    pd.set_option("display.max_colwidth", None)
-    pd.set_option("display.width", 300)
+    #Arguments
     
     args = parse_args()
     input_motif = args.motif
@@ -1430,28 +1355,31 @@ if __name__ == "__main__":
     relevant_positions = args.positions
     input_run_name = args.run_name
 
+    #Pandas settings
+
+    pd.set_option("display.max_columns", None)
+    pd.set_option("display.max_colwidth", None)
+    pd.set_option("display.width", 300)
+
+    #General
+
     recognition_motif = define_recognition_motif(input_motif)
     window_size = len(recognition_motif)
-
     output_dir = create_output_folder(pdb, input_run_name)
+
+    #Fasta sequence preparation
 
     fasta_seqs = get_fasta_seq(fasta)
     fasta_seq = fasta_seqs[0][1]
 
-    all_motifs = get_motifs(csv_file, recognition_motif)
-
-    mismatch_dict = count_mismatches(fasta_seq, all_motifs, window_size)
+    #Preparation of exprimental data and tested motifs
 
     default_data = BASE_DIR/"experimental_data.csv"
-
     exp_data = load_mutation_data(default_data)
+    all_motifs = get_motifs(default_data, recognition_motif)
 
-    a_scores_per_motif = get_assessment_score(mismatch_dict, exp_data, position_scoring, recognition_motif)
-    ac_scores_per_motif = get_confidence_score(a_scores_per_motif, exp_data, position_scoring, recognition_motif)
-    SS_per_motif = make_SS_output_tables_per_motif(ac_scores_per_motif, output_mode)
-
-    #Adjustment of pdb residue numbers to fasta
-
+    #Preparation and repairation of PDB + adjustment to fasta sequence
+    
     pdb_seqs = get_pdb_seq(pdb)
     pdb_seq = output_dir / "pdb_sequences.txt"
     best_per_fasta = get_alignment_info(fasta_seqs, pdb_seqs)
@@ -1462,13 +1390,16 @@ if __name__ == "__main__":
     pdb_for_name = Path(pdb)
     prepaired_pdb = output_dir/f"{pdb_for_name.stem}_prepaired.pdb"
 
-    #Calculation of mutation energies
+    #Sequence scoring
+
+    mismatch_dict = count_mismatches(fasta_seq, all_motifs, window_size)
+    a_scores_per_motif = get_assessment_score(mismatch_dict, exp_data, position_scoring, recognition_motif)
+    SS_per_motif = make_SS_output_tables_per_motif(a_scores_per_motif, output_mode)
+
+    #Energy calculation and scoring 
 
     rawMutEnergyList = make_rawMutEnergyList(BASE_DIR, output_dir, prepaired_pdb, foldx_path, far_enough_res, far_enough_zone)
     MutEnergyList = get_MutEnergyList(rawMutEnergyList)
-
-    #Energy Scoring 
-
     ddg_per_motif = get_ddgs(alignment_tables, all_motifs, MutEnergyList)
     energy_scores_per_motif = get_energy_scores(ddg_per_motif)
     ES_per_motif = make_ES_output_tables_per_motif(energy_scores_per_motif, output_mode)
@@ -1480,13 +1411,13 @@ if __name__ == "__main__":
     secstr_scores_df = get_secstr_scores(simple_secstr_df, output_mode, recognition_motif)
 
     #Volume Scoring
+
     volumes_dict = get_volumes(prepaired_pdb, fasta_seqs, pdb_seq)
     volumes_df = score_volumes(volumes_dict)
 
     #Combination of all information in one table
 
     final_tables = make_combined_table(SS_per_motif, ES_per_motif, secstr_scores_df, volumes_df, input_motif)
-
     final_sorted = sort_output(final_tables, all_motifs, output_sorting, top_k)
 
     for motif, motif_df in final_sorted.items():
@@ -1499,5 +1430,4 @@ if __name__ == "__main__":
             )
         )
 
-    print(all_motifs)
    
