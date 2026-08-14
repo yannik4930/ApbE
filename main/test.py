@@ -1,6 +1,7 @@
 from pathlib import Path
 from Bio import Align
 from Bio.SeqUtils import seq1
+from datetime import datetime
 import pandas as pd
 import numpy as np
 import subprocess
@@ -19,18 +20,8 @@ import argparse
 BASE_DIR = Path(__file__).resolve().parent
 foldx_path = "/scratch/s6765211/FoldX/foldx5_Linux/foldx_20270131"
 
-#get_fasta_seq
-fasta = BASE_DIR / "rcsb_pdb_1G3F.fasta"
-
-#get_pdb_seq
-pdb = BASE_DIR / "1G3F.pdb"
-
 #exp_data
 csv_file = BASE_DIR/"experimental_data.csv"
-
-###pyFRESCO
-pyfresco_dir = BASE_DIR / "pyFRESCO"
-pyfresco_dir.mkdir(exist_ok = True)
 
 #non-mutable region
 far_enough_res = None
@@ -41,6 +32,7 @@ repair = True
 
 #open yasara in text mode (won't work on cluster otherwise)
 yasara.info.mode = "txt"
+yasara.run("Console Off")
 
 recognition_motifs = {
     "F1": "GVDGLSGATLTS",
@@ -167,27 +159,44 @@ position_scoring = {
 
 #--------------------Prepares dictionary containing experimentally tested motifs and respective efficiencies--------------------# 
 
-def get_motifs(csv_file):
+def get_motifs(csv_file, recognition_motif):
 
-    exp_data = pd.read_csv(csv_file, sep = ";", decimal = ",")
+    exp_data = pd.read_csv(
+        csv_file,
+        sep=";",
+        decimal=",",
+    )
 
     all_motifs = {
-        "DGLSGAT": 1
-        }
+        recognition_motif: 1.0
+    }
 
-    #takes information about mutations within F1 from exp_data list, alters F1 string and appends it to motif list together with exp. tested loading efficiencies
-    for index, row in exp_data.iterrows():
+    f2_offset = recognition_motif.index(f2_motif)
 
-        mut_pos = row["Position"]
-        motif = f"{recognition_motif[:mut_pos]}{row['Mutation']}{recognition_motif[(mut_pos+1):]}"
+    for _, row in exp_data.iterrows():
 
-        all_motifs[motif] = row["Efficiency"]
+        f2_position = int(row["Position"]) 
+
+        if f2_position == 6:
+            continue
+
+        motif_index = f2_offset + f2_position 
+
+        mutated_motif = list(recognition_motif)
+        mutated_motif[motif_index] = row["Mutation"]
+        mutated_motif = "".join(mutated_motif)
+
+        if mutated_motif == recognition_motif:
+            print("Referenzmotiv wird überschrieben:")
+            print(row)
+
+        all_motifs[mutated_motif] = row["Efficiency"]
 
     return all_motifs
 
 # sliding window mechanism splits sequence into 7mers (windows)
 # creates dictionary with a list of windows for each number of mismatches
-def count_mismatches(sequence, all_motifs, window_size, max_mismatches: str):
+def count_mismatches(sequence, all_motifs, window_size):
 
     windows = []
 
@@ -200,15 +209,9 @@ def count_mismatches(sequence, all_motifs, window_size, max_mismatches: str):
     for motif in all_motifs:
 
         mismatches_per_motif = {
-                0: [],
-                1: [], 
-                2: [], 
-                3: [], 
-                4: [],
-                5: [],
-                6: [],
-                7: [],
-            }
+            mismatch_count: []
+            for mismatch_count in range(window_size + 1)
+        }
     
         for index, window in enumerate(windows):
             mismatches = 0
@@ -219,8 +222,7 @@ def count_mismatches(sequence, all_motifs, window_size, max_mismatches: str):
                     mismatches += 1
                     mismatch_info.append(((pos + 1), a, b))
         
-            if mismatches <= max_mismatches:
-                mismatches_per_motif[mismatches].append(((index + 1), window, mismatch_info))
+            mismatches_per_motif[mismatches].append((index + 1, window, mismatch_info))
 
         mismatch_dict[motif] = mismatches_per_motif
 
@@ -249,88 +251,154 @@ def get_efficiency(matrix_value, a, b, R2):
     return x
 
 #walks through mismatch_dict and assigns score to each window, depending on number of mismatches, existance of exp_data and substition matrices 
-def get_assessment_score(mismatch_dict, exp_data, position_scoring):
+def get_assessment_score(mismatch_dict, exp_data, position_scoring, recognition_motif):
 
     a_scores_per_motif = {}
 
     for motif, mismatches_per_motif in mismatch_dict.items():
 
-        scored_motifs = [] 
-    
+        scored_motifs = []
+        motif_length = len(motif)
+
         for mismatch_count, motif_hits in mismatches_per_motif.items():
-        
+
             for pos, window_sequence, mismatch_details in motif_hits:
-                assessment_score = 0 
-                assessment_score += window_size - mismatch_count
-            
-                for mm_pos, window_aa, original_aa in mismatch_details:
-                    mismatch = (mm_pos, window_aa, original_aa)
+
+                assessment_score = motif_length - mismatch_count
+
+                for motif_position, window_aa, motif_aa in mismatch_details:
+
+                    f2_position = get_f2_position(
+                        motif_position,
+                        recognition_motif,
+                    )
+
+                    if f2_position is None:
+                        continue
+
+                    if f2_position == 7:
+                        continue
+
+                    mismatch = (
+                        f2_position,
+                        window_aa,
+                        motif_aa,
+                    )
 
                     if mismatch in exp_data:
+
                         efficiency = exp_data[mismatch]
                         assessment_score += efficiency
 
-                    else: 
-                        if mm_pos == 7:
-                            assessment_score += 0
-                        
-                        else:
-                            best_matrix = position_scoring[mm_pos]["matrix"]
-                            matrix_val = best_matrix[(window_aa, original_aa)]
-                            matrix_based_efficiency = get_efficiency(matrix_val, position_scoring[mm_pos]["a"], position_scoring[mm_pos]["b"], position_scoring[mm_pos]["R2"])
-                            capped_efficiency = min(matrix_based_efficiency, 1) 
-                            assessment_score += capped_efficiency
+                    else:
 
-                normalized_assessment_score = assessment_score / len(recognition_motif)
-                rounded_assessment_score = round(normalized_assessment_score, 5)
-                        
-                scored_motifs.append((pos, window_sequence, rounded_assessment_score, mismatch_details))
+                        scoring_data = position_scoring[f2_position]
+                        matrix = scoring_data["matrix"]
+
+                        matrix_value = matrix[
+                            (window_aa, motif_aa)
+                        ]
+
+                        matrix_based_efficiency = get_efficiency(
+                            matrix_value,
+                            scoring_data["a"],
+                            scoring_data["b"],
+                            scoring_data["R2"],
+                        )
+
+                        capped_efficiency = min(
+                            matrix_based_efficiency,
+                            1.0,
+                        )
+
+                        assessment_score += capped_efficiency
+
+                normalized_assessment_score = (
+                    assessment_score / motif_length
+                )
+
+                rounded_assessment_score = round(
+                    normalized_assessment_score,
+                    5,
+                )
+
+                scored_motifs.append((
+                    pos,
+                    window_sequence,
+                    rounded_assessment_score,
+                    mismatch_details,
+                ))
 
         a_scores_per_motif[motif] = scored_motifs
 
-    return(a_scores_per_motif)
+    return a_scores_per_motif
 
 
-def get_confidence_score(a_scores_per_motif, exp_data, position_scoring):
+def get_confidence_score(a_scores_per_motif, exp_data, position_scoring, recognition_motif):
 
     ac_scores_per_motif = {}
 
     for motif, scored_motifs in a_scores_per_motif.items():
 
-        scored_motifs_2 = {} 
-        
-        for pos, window_sequence, assessment_score, mismatch_details in scored_motifs:
-            confidence_score = 0 
-            confidence_score += window_size - len(mismatch_details)
-            
-            for mm_pos, original_aa, window_aa in mismatch_details:
-                mismatch = (mm_pos, original_aa, window_aa)
+        scored_motifs_2 = {}
+        motif_length = len(motif)
+
+        for (pos, window_sequence, assessment_score, mismatch_details) in scored_motifs:
+
+            confidence_score = (
+                motif_length - len(mismatch_details)
+            )
+
+            for motif_position, window_aa, motif_aa in mismatch_details:
+
+                f2_position = get_f2_position(
+                    motif_position,
+                    recognition_motif,
+                )
+
+                if f2_position is None:
+                    continue
+
+                if f2_position == 7:
+                    confidence_score += 1
+                    continue
+
+                mismatch = (
+                    f2_position,
+                    window_aa,
+                    motif_aa,
+                )
 
                 if mismatch in exp_data:
+
                     confidence_score += 1
 
                 else:
-                    if mm_pos == 7:
-                        confidence_score += 1
 
-                    else:
-                        R2 = position_scoring[mm_pos]["R2"]
-                        confidence_score += R2
+                    confidence_score += (
+                        position_scoring[f2_position]["R2"]
+                    )
 
-            normalized_confidence_score = confidence_score / len(recognition_motif)
-            rounded_confidence_score = round(normalized_confidence_score, 5)
+            normalized_confidence_score = (
+                confidence_score / motif_length
+            )
+
+            rounded_confidence_score = round(
+                normalized_confidence_score,
+                5,
+            )
 
             scored_motifs_2[pos] = {
-                "Sequence Score": assessment_score, 
-                "Confidence": rounded_confidence_score, 
+                "Sequence Score": assessment_score,
+                "Confidence": rounded_confidence_score,
                 "MM": len(mismatch_details),
                 "Window Sequence": window_sequence,
-                "Details": mismatch_details
+                "Details": mismatch_details,
             }
 
         ac_scores_per_motif[motif] = scored_motifs_2
-            
-    return(ac_scores_per_motif)
+
+    return ac_scores_per_motif
 
 
 def make_SS_output_tables_per_motif(ac_scores_per_motif, output_mode):
@@ -346,9 +414,6 @@ def make_SS_output_tables_per_motif(ac_scores_per_motif, output_mode):
             )
             .rename_axis("Pos")
         )
-
-        motif_scores.index = range(1, len(motif_scores) + 1)
-        motif_scores.index.name = "Pos"
 
         if output_mode == "verbose":
 
@@ -384,7 +449,7 @@ def get_pdb_seq(pdb):
     for i, a in enumerate(resultlist, start = 1): # assigns index to all molecules 
         yasara.NameMol(f"Obj 1 Mol {a}, {i}") #replaces old_name with index
 
-    pdb_seq = BASE_DIR / "pdb_sequences.txt" #variable for the file where yasara saves the sequences in the next line
+    pdb_seq = output_dir / "pdb_sequences.txt" #variable for the file where yasara saves the sequences in the next line
 
     yasara.SaveSeqMol("All", pdb_seq, join="No") #saves sequences of each molecule as individual fasta in one .txt file 
 
@@ -525,8 +590,11 @@ def save_alignment_tables(alignment_tables):
 
     for fasta_id, alignment_table in alignment_tables.items():
 
-        seq_name = fasta_id.split("|")[0]
-        alignment_table.to_csv(f"{seq_name}_align_table.tab", sep = "\t")
+        seq_name = fasta_id.lstrip(">").split("|")[0]
+
+        output_file = output_dir / f"{seq_name}_align_table.tab"
+
+        alignment_table.to_csv(output_file, sep = "\t")
 
 #--------------------Selects best aligning object/molecule to fasta sequence in yasara--------------------#
 
@@ -568,7 +636,7 @@ def reassign_pdb_residues(pdb, best_per_fasta): #output in form of prepared .pdb
     first_res_of_pdb_seq = list(best_per_fasta.values())[0]["aligned_areas"][0][0][0] + 1 #takes first residue of pdb compared to fasta
 
     yasara.NumberRes(selector, first = first_res_of_pdb_seq) #Reassigns residue numbers of pdb based on numbers from alignment
-    prepared_pdb = BASE_DIR / f"{pdb.stem}_prepared.pdb" #variable for place to save the prepared pdb
+    prepared_pdb = output_dir / f"{pdb.stem}_prepared.pdb" #variable for place to save the prepared pdb
     yasara.SavePDB("Obj 1", prepared_pdb)
     
     return(prepared_pdb)
@@ -583,21 +651,19 @@ def repair_pdb(prepared_pdb, pdb):
     yasara.LoadPDB(prepared_pdb)
     yasara.CleanAll()
     yasara.OptHydAll(method = "Yasara")
-    prepaired_pdb = BASE_DIR/f"{pdb.stem}_prepaired.pdb"
+    prepaired_pdb = output_dir/f"{pdb.stem}_prepaired.pdb"
     yasara.SavePDB("Obj 1", prepaired_pdb)
     os.remove(prepared_pdb)
 
 #--------------------Execute pyFRESCO to get ddG of all possible mutations and prepares resulting rawMutEnergyList--------------------#
 
-def make_rawMutEnergyList(work_dir, pyfresco_dir, prepaired_pdb, foldx_path, far_enough_res, far_enough_zone):
+def make_rawMutEnergyList(work_dir, output_dir, prepaired_pdb, foldx_path, far_enough_res, far_enough_zone):
 
-    subfolder_pdb = pyfresco_dir / prepaired_pdb.name
-    selection_tab = pyfresco_dir / f"{prepaired_pdb.stem}.tab"
+    selection_tab = output_dir / f"{prepaired_pdb.stem}.tab"
 
-    shutil.copy(prepaired_pdb, subfolder_pdb)
-    shutil.copy(work_dir / "DistributeFoldx.py", pyfresco_dir / "DistributeFoldx.py")
-    shutil.copy(work_dir / "submit_fresco.sh", pyfresco_dir / "submit_fresco.sh")
-    shutil.copy(work_dir / "fresco_job.sh", pyfresco_dir / "fresco_job.sh")
+    shutil.copy(work_dir / "DistributeFoldx.py", output_dir / "DistributeFoldx.py")
+    shutil.copy(work_dir / "submit_fresco.sh", output_dir / "submit_fresco.sh")
+    shutil.copy(work_dir / "fresco_job.sh", output_dir / "fresco_job.sh")
 
     far_enough_command = [
         sys.executable, 
@@ -626,13 +692,12 @@ def make_rawMutEnergyList(work_dir, pyfresco_dir, prepaired_pdb, foldx_path, far
         f"{prepaired_pdb.stem}.tab",
         "500",
         foldx_path
-    ], cwd = pyfresco_dir, check = True)
+    ], cwd = output_dir, check = True)
 
     subprocess.run(
-        ["bash", "submit_fresco.sh"],
-        cwd = pyfresco_dir, 
-        check = True
-    )
+        ["bash", 
+        "submit_fresco.sh"
+    ], cwd = output_dir, check = True)
 
     subprocess.run([
         sys.executable, 
@@ -640,9 +705,9 @@ def make_rawMutEnergyList(work_dir, pyfresco_dir, prepaired_pdb, foldx_path, far
         "Phase2",
         prepaired_pdb.name,
         "-5"
-    ], cwd = pyfresco_dir, check = True)
+    ], cwd = output_dir, check = True)
 
-    return pyfresco_dir / "MutationEnergies_CompleteList.tab"
+    return output_dir / "MutationEnergies_CompleteList.tab"
 
 
 def get_MutEnergyList(rawMutEnergyList):
@@ -723,7 +788,11 @@ def get_ddgs(alignment_tables, all_motifs, MutEnergyList):
                             })
 
                     else:
-                        continue
+                        ddg_per_mutation.setdefault(pos, []).append({
+                            "mutation": "None",
+                            "ddG": 0,
+                            "sd": 0,
+                        })
             
             #sums up the ddg + sd values of every 7mer and puts them into a dictionary
             #=> one dictionary for every motif
@@ -738,8 +807,8 @@ def get_ddgs(alignment_tables, all_motifs, MutEnergyList):
             #puts the dictionaries of all the motifs into one dictionary 
             ddg_per_motif[motif] = ddg_per_position
 
-    with open("ddg_per_motif.json", "w") as file:
-            json.dump(ddg_per_motif, file, indent = 4)
+    with open(output_dir / "ddg_per_motif.json", "w") as file:
+        json.dump(ddg_per_motif, file, indent = 4)
 
     return(ddg_per_motif)
 
@@ -773,6 +842,9 @@ def get_energy_scores(ddg_per_motif):
             elif ddg_value < -5: 
                 score = 0.5 + 0.3 * math.exp(0.5 * (ddg_value + 5))
 
+            else:
+                score = 1
+
             score = round(score, 5)
 
             residue_scores[residue] = {
@@ -782,6 +854,9 @@ def get_energy_scores(ddg_per_motif):
             }
 
         motif_scores[motif] = residue_scores    
+
+    with open(output_dir / "motif_scores.json", "w") as file:
+        json.dump(motif_scores, file, indent = 4)
     
     return motif_scores
 
@@ -825,12 +900,41 @@ def make_ES_output_tables_per_motif(energy_scores_per_motif, output_mode):
 #________________________________SECONDARY STRUCTURE SCORER__________________________________#
 
 #--------------------Extracts information about secondary structure of each position from pdb--------------------#
-def getSecStr(prepaired_pdb):
+
+def getSecStr(prepaired_pdb, fasta_seqs, pdb_seq):
 
     yasara.Clear()
     yasara.LoadPDB(prepaired_pdb)
 
-    ca_atoms = yasara.ListAtom("CA Protein Obj 1")
+    records = []
+    current_header = None
+    current_lines = []
+
+    with open(pdb_seq, "r") as f:
+        for line in f:
+            line = line.strip()
+
+            #saves current header from last round and the current_lines that get joined in the process
+            if line.startswith(">"):
+                if current_header is not None:
+                    records.append((current_header, "".join(current_lines)))
+
+                #defines line that started with ">" as the new header and opens list for lines (saved as individual strings) 
+                current_header = line
+                current_lines = []
+
+            #takes all lines that don't beginn with ">" and appends them to the current_lines list
+            else:
+                current_lines.append(line)
+
+    #saves content of last round if there is no more line that starts with ">"
+    if current_header is not None:
+        records.append((current_header, "".join(current_lines)))
+    
+    prepaired_pdb_best_per_fasta = get_alignment_info(fasta_seqs, records)
+    selector = yasara_selector_from_fasta_header(prepaired_pdb_best_per_fasta) 
+    
+    ca_atoms = yasara.ListAtom(f"CA Protein {selector}")
 
     secstr_dict = {}
 
@@ -904,14 +1008,17 @@ def simplify_secstr_output(secstr_df):
 
 #--------------------Extracts information about secondary structure of each position from pdb--------------------#
 
-def get_secstr_scores(simple_secstr_df, output_mode):
+def get_secstr_scores(simple_secstr_df, output_mode, recognition_motif):
+
+    f2_offset = recognition_motif.index(f2_motif)
+    essential_thr_index = f2_offset + 6
+    beginning_of_allowed_aH = essential_thr_index - 1
+    end_of_allowed_bS = f2_offset + 1
 
     windows = []
     scores = {}
 
-    secstrchain = "".join(
-        simple_secstr_df["SecStr"].astype(str)
-    )
+    secstrchain = "".join(simple_secstr_df["SecStr"].astype(str))
 
     for i in range(len(secstrchain) - window_size + 1):
         window = secstrchain[i:i + window_size]
@@ -919,9 +1026,7 @@ def get_secstr_scores(simple_secstr_df, output_mode):
 
     for i, window in enumerate(windows): 
 
-        window_positions = list(
-            simple_secstr_df.index[i:i + window_size]
-        )
+        window_positions = list(simple_secstr_df.index[i:i + window_size])
 
         position = window_positions[0]
 
@@ -936,31 +1041,42 @@ def get_secstr_scores(simple_secstr_df, output_mode):
             continue
         
         else: 
-            coil_weights = [1, 1, 1, 1, 1, 1, 1]
+            coil_weights = [1] * window_size
             position_7_helix_bonus = 3
 
             score = 0
 
-            for secstr, weight in zip(
-                window,
-                coil_weights,
-            ):
+            for secstr, weight in zip(window, coil_weights,):
+
                 if secstr == "C":
                     score += weight
 
-            if window[6] == "H":
+            for index in range(end_of_allowed_bS + 1):
+
+                if window[index] == "E":
+                    score += 1
+
+            for index in range(beginning_of_allowed_aH, len(window)):
+
+                if (window[index] == "H" and index != essential_thr_index):
+                    score += 1
+
+            if window[essential_thr_index] == "H":
                 score += position_7_helix_bonus
 
-            normalized_score = (score / 9) * 1.5
+            maximum_score = (window_size - 1 + position_7_helix_bonus)
+            normalized_score = (score / maximum_score) * 1.5
             rounded_score = round(normalized_score, 5) 
 
             if output_mode == min:
-                scores[position] = rounded_score
+                scores[position] = {
+                    "SecStr Score" : rounded_score
+                }
 
             else:
                 scores[position] = {
                     "SecStr Score": rounded_score, 
-                    "SecStr": simple_secstr_df.loc[position, "SecStr"]
+                    "SecStr": window,
                 }
 
         scores_df = pd.DataFrame.from_dict(
@@ -971,7 +1087,162 @@ def get_secstr_scores(simple_secstr_df, output_mode):
     return(scores_df)
 
 
-def make_combined_table(SS_per_motif, ES_per_motif, secstr_scores_df):
+#________________________________VOLUME SCORER__________________________________#
+#--------------------Calculates occupancy for volumes in front of each residues sidechain--------------------#
+
+def get_volumes(prepaired_pdb, fasta_seqs, pdb_seq):
+
+    yasara.Clear()
+    yasara.LoadPDB(prepaired_pdb)
+
+    records = []
+    current_header = None
+    current_lines = []
+
+    with open(pdb_seq, "r") as f:
+        for line in f:
+            line = line.strip()
+
+            #saves current header from last round and the current_lines that get joined in the process
+            if line.startswith(">"):
+                if current_header is not None:
+                    records.append((current_header, "".join(current_lines)))
+
+                #defines line that started with ">" as the new header and opens list for lines (saved as individual strings) 
+                current_header = line
+                current_lines = []
+
+            #takes all lines that don't beginn with ">" and appends them to the current_lines list
+            else:
+                current_lines.append(line)
+
+    #saves content of last round if there is no more line that starts with ">"
+    if current_header is not None:
+        records.append((current_header, "".join(current_lines)))
+    
+    prepaired_pdb_best_per_fasta = get_alignment_info(fasta_seqs, records)
+    selector = yasara_selector_from_fasta_header(prepaired_pdb_best_per_fasta)
+
+    parts = selector.split()
+    obj_num = int(parts[1])
+
+    resnumber_list = yasara.ListRes(f"Protein Obj {obj_num}, Format=RESNUM")
+    residue_list = yasara.ListRes(f"Protein Obj {obj_num}, Format=RESName")
+
+    residue_dict = {
+        int(resnumber): residue_name
+        for resnumber, residue_name in zip(
+            resnumber_list,
+            residue_list,
+            strict=True,
+        )
+    }   
+
+    volume_dict = {}
+
+    for pos, residue in residue_dict.items():    
+
+        if residue in ["Pro", "Gly"]:
+
+            yasara.SwapRes(pos, "Ala", isomer = "L")
+
+            CA_selection = f"{selector} Res {pos} Atom CA"
+            CB_selection = f"{selector} Res {pos} Atom CB"
+
+            CA_atoms = yasara.ListAtom(CA_selection)
+            CB_atoms = yasara.ListAtom(CB_selection)
+
+            CA_atom = CA_atoms[0]
+            CB_atom = CB_atoms[0]
+
+            CA = np.array(yasara.PosAtom(CA_atom, coordsys = "global"), dtype = float)
+            CB = np.array(yasara.PosAtom(CB_atom, coordsys = "global"), dtype = float)
+
+
+            yasara.SwapRes(pos, residue, isomer = "L")
+
+        else:
+
+            CA_selection = f"{selector} Res {pos} Atom CA"
+            CB_selection = f"{selector} Res {pos} Atom CB"
+
+            CA_atoms = yasara.ListAtom(CA_selection)
+            CB_atoms = yasara.ListAtom(CB_selection)
+
+            CA_atom = CA_atoms[0]
+            CB_atom = CB_atoms[0]
+
+            CA = np.array(yasara.PosAtom(CA_atom, coordsys = "global"), dtype = float)
+            CB = np.array(yasara.PosAtom(CB_atom, coordsys = "global"), dtype = float)
+
+
+        BA = CB - CA
+        BA_length = np.linalg.norm(BA)
+        unit_BA = BA / BA_length
+
+        C = CB + unit_BA * 9
+        R = 9
+        
+        x, y, z = C
+
+        dummy_obj = yasara.BuildAtom("C")
+
+        yasara.PosObj(dummy_obj, x=x, y=y, z=z)
+
+        sphere_selection = (
+            f"Protein with distance<{R} from Obj {dummy_obj}"
+        )
+
+        atoms_in_sphere = yasara.ListAtom(sphere_selection)
+
+        atom_volumes = yasara.VolumeAtom(atoms_in_sphere, Type = "VdW")[0]
+
+        atom_volumes = round(atom_volumes, 5)
+
+        volume_dict[pos] = atom_volumes
+
+        yasara.DelObj("2")
+
+    return volume_dict
+
+#--------------------Calculates scores out of the occupancy rates--------------------#
+
+def score_volumes(volume_dict):
+
+    pi = math.pi
+    sphere_radius = float(9)
+    sphere_volume = 4/3*pi*sphere_radius**3
+    sphere_volume = round(sphere_volume, 5)
+
+    volume_scores = {}
+
+    for pos, atom_volume in volume_dict.items():
+
+        occupancy = atom_volume / sphere_volume
+
+        score = 1 - occupancy
+        score = round(score, 5)
+
+        volume_scores[pos] = {
+            "Volume Score": score,
+            "Occupied Volume": f"{round(atom_volume, 0)}/{round(sphere_volume, 0)} Å"
+        }
+
+    volumes_df = pd.DataFrame.from_dict(
+        volume_scores,
+        orient="index",
+    )    
+
+    return volumes_df
+
+
+def make_combined_table(SS_per_motif, ES_per_motif, secstr_scores_df, volumes_df, input_motif):
+
+    if input_motif == "F1":
+        volume_score_offset = 8
+
+    else:
+        volume_score_offset = 6
 
     final_output_dict = {}
 
@@ -981,10 +1252,7 @@ def make_combined_table(SS_per_motif, ES_per_motif, secstr_scores_df):
 
             ES_df = ES_per_motif[motif]
 
-            combined_df = SS_df.join(
-                ES_df, 
-                how = "left"
-            )
+            combined_df = SS_df.join(ES_df, how = "left")
 
             o_score = (combined_df["Sequence Score"] * combined_df["Energy Score"]).round(5)
 
@@ -992,10 +1260,7 @@ def make_combined_table(SS_per_motif, ES_per_motif, secstr_scores_df):
             combined_df = SS_df.copy()
             o_score = float("nan")
 
-        combined_df = combined_df.join(
-            secstr_scores_df,
-            how = "left"
-        )
+        combined_df = combined_df.join(secstr_scores_df, how = "left")
 
         secstr_factor = (
             combined_df["SecStr Score"].where(
@@ -1004,25 +1269,27 @@ def make_combined_table(SS_per_motif, ES_per_motif, secstr_scores_df):
             )
         )
 
-        o_score = (
-            combined_df["Sequence Score"]* combined_df["Energy Score"]* secstr_factor
+        #preparation of volumes_df index 
+        volumes_df_shifted = volumes_df.copy()
+        volumes_df_shifted.index = volumes_df_shifted.index - volume_score_offset
+
+        combined_df = combined_df.join(
+            volumes_df_shifted,
+            how="left",
         )
 
-        o_score = (
-            o_score
-            .clip(upper=1.0)
-            .round(5)
-        )
+        o_score = (combined_df["Sequence Score"]* combined_df["Energy Score"]* secstr_factor * combined_df["Volume Score"])
 
-        combined_df.insert(
-            0,
-            "O-Score",
-            o_score
-        )
+        o_score = (o_score / 1.5).round(5)
+
+        combined_df.insert(0, "O-Score", o_score)
+
+        combined_df = (combined_df.rename_axis("Pos").reset_index())
 
         final_output_dict[motif] = combined_df
         
     return final_output_dict
+
 
 def sort_output(final_tables, all_motifs, output_sorting, top_k):
 
@@ -1049,8 +1316,44 @@ def sort_output(final_tables, all_motifs, output_sorting, top_k):
 
             best_per_motif[(motif, efficiency)] = sorted_df.head(top_k)
 
-        return(best_per_motif)
+        output_tables = []
 
+        for (motif, efficiency), df in best_per_motif.items():
+            output_df = df.copy()
+
+            output_df.insert(0, "Efficiency", efficiency)
+            output_df.insert(0, "Motif", motif)
+
+            output_tables.append(output_df)
+
+        if output_tables:
+            best_per_motif_df = pd.concat(output_tables)
+
+            best_per_motif_df.to_csv(
+                output_dir / "final.tsv",
+                sep="\t",
+                index=True,
+                index_label="Pos",
+            )
+
+        return best_per_motif
+
+
+def create_output_folder(pdb, input_run_name = None):
+
+    pdb_id = pdb.stem
+
+    if input_run_name is None:
+        run_name = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+
+    else:
+        run_name = input_run_name.strip().replace(" ", "_")
+
+    output_dir = (BASE_DIR / "outputs" / pdb_id / run_name)
+
+    output_dir.mkdir(parents = True, exist_ok = True)
+
+    return output_dir
 
 
 def parse_args():
@@ -1072,6 +1375,11 @@ def parse_args():
     parser.add_argument(
         "pdb_file",
         help = "Enter pdb file of POI"
+    )
+
+    parser.add_argument(
+        "--run_name",
+        help= "Specify name of run"        
     )
 
     parser.add_argument(
@@ -1113,47 +1421,50 @@ if __name__ == "__main__":
     pd.set_option("display.width", 300)
     
     args = parse_args()
-
     input_motif = args.motif
-    fasta_file = args.fasta_file
-    pdb = args.pdb_file
+    fasta = Path(args.fasta_file)
+    pdb = Path(args.pdb_file)
     top_k = args.top_k
     output_mode = args.output_mode
     output_sorting = args.output_sorting
     relevant_positions = args.positions
+    input_run_name = args.run_name
 
     recognition_motif = define_recognition_motif(input_motif)
     window_size = len(recognition_motif)
 
+    output_dir = create_output_folder(pdb, input_run_name)
+
     fasta_seqs = get_fasta_seq(fasta)
     fasta_seq = fasta_seqs[0][1]
 
-    all_motifs = get_motifs(csv_file)
+    all_motifs = get_motifs(csv_file, recognition_motif)
 
-    mismatch_dict = count_mismatches(fasta_seq, all_motifs, window_size, 7)
+    mismatch_dict = count_mismatches(fasta_seq, all_motifs, window_size)
 
     default_data = BASE_DIR/"experimental_data.csv"
 
     exp_data = load_mutation_data(default_data)
 
-    a_scores_per_motif = get_assessment_score(mismatch_dict, exp_data, position_scoring)
-    ac_scores_per_motif = get_confidence_score(a_scores_per_motif, exp_data, position_scoring)
+    a_scores_per_motif = get_assessment_score(mismatch_dict, exp_data, position_scoring, recognition_motif)
+    ac_scores_per_motif = get_confidence_score(a_scores_per_motif, exp_data, position_scoring, recognition_motif)
     SS_per_motif = make_SS_output_tables_per_motif(ac_scores_per_motif, output_mode)
 
     #Adjustment of pdb residue numbers to fasta
 
     pdb_seqs = get_pdb_seq(pdb)
+    pdb_seq = output_dir / "pdb_sequences.txt"
     best_per_fasta = get_alignment_info(fasta_seqs, pdb_seqs)
     alignment_tables = concat_alignment_tables(best_per_fasta)
     save_alignment_tables(alignment_tables)
     prepared_pdb = reassign_pdb_residues(pdb, best_per_fasta) #Path to pdb with reassigned residues
     repair_pdb(prepared_pdb, pdb)
     pdb_for_name = Path(pdb)
-    prepaired_pdb = BASE_DIR/f"{pdb_for_name.stem}_prepaired.pdb"
+    prepaired_pdb = output_dir/f"{pdb_for_name.stem}_prepaired.pdb"
 
     #Calculation of mutation energies
 
-    rawMutEnergyList = make_rawMutEnergyList(BASE_DIR, pyfresco_dir, prepaired_pdb, foldx_path, far_enough_res, far_enough_zone)
+    rawMutEnergyList = make_rawMutEnergyList(BASE_DIR, output_dir, prepaired_pdb, foldx_path, far_enough_res, far_enough_zone)
     MutEnergyList = get_MutEnergyList(rawMutEnergyList)
 
     #Energy Scoring 
@@ -1164,13 +1475,17 @@ if __name__ == "__main__":
 
     #Secondary Structure Scoring
 
-    secstr_df = getSecStr(prepaired_pdb)
+    secstr_df = getSecStr(prepaired_pdb, fasta_seqs, pdb_seq)
     simple_secstr_df = simplify_secstr_output(secstr_df)
-    secstr_scores_df = get_secstr_scores(simple_secstr_df, output_mode)
+    secstr_scores_df = get_secstr_scores(simple_secstr_df, output_mode, recognition_motif)
+
+    #Volume Scoring
+    volumes_dict = get_volumes(prepaired_pdb, fasta_seqs, pdb_seq)
+    volumes_df = score_volumes(volumes_dict)
 
     #Combination of all information in one table
 
-    final_tables = make_combined_table(SS_per_motif, ES_per_motif, secstr_scores_df)
+    final_tables = make_combined_table(SS_per_motif, ES_per_motif, secstr_scores_df, volumes_df, input_motif)
 
     final_sorted = sort_output(final_tables, all_motifs, output_sorting, top_k)
 
@@ -1183,148 +1498,6 @@ if __name__ == "__main__":
                 float_format=lambda value: f"{value:.4f}"
             )
         )
-    
 
-
+    print(all_motifs)
    
-
-
-
-    
-
-        
-
-
-
-
-
-        
-        
-
-
-
-
-
-
-
-
-"""
-best_ddg_df = get_ddg_of_pos(ddg_per_motif, all_motifs)
-    best_score_df = get_score_of_pos(energy_scores_per_motif, all_motifs)
-    best_df = best_overall(energy_scores_per_motif, all_motifs)
-    best_F1_df = best_for_F1(energy_scores_per_motif, ddg_per_motif, F1)
-
-    print(best_df)
-    print(best_ddg_df)
-    print(best_score_df)
-    print(best_F1_df)
-"""
-    
-"""
-#--------------------Creates list of best ddg values per motifs of a given (input) position--------------------# 
-
-def get_ddg_of_pos(ddg_per_motif, all_motifs):
-
-    ddg_of_input_pos = []
-
-    for motif, positions in ddg_per_motif.items():
-
-        for residue, values in positions.items():
-
-            if int(residue) == int(position):
-
-                efficiency = all_motifs[motif]
-                ddg_of_input_pos.append((motif, values, efficiency))
-    
-    ddg_of_input_pos.sort(key=lambda x: abs(x[1]["ddG"]))  
-    best_ddg_df = pd.DataFrame(
-        ddg_of_input_pos,
-        columns=["motif", "ddG", "efficiency"]
-    )
-
-    return best_ddg_df.head(top_k)
-
-#--------------------Creates list of best scores per motifs of a given (input) position--------------------# 
-
-def get_score_of_pos(motif_scores, all_motifs):
-
-    scores_of_input_pos = []
-
-    for motif, positions in motif_scores.items():
-
-        for residue, score in positions.items():
-
-            if int(residue) == int(position):
-
-                efficiency = all_motifs[motif]
-                scores_of_input_pos.append((motif, score, efficiency))
-                scores_of_input_pos.sort(key=lambda x: x[1], reverse = True)
-
-    best_score_df = pd.DataFrame(
-        scores_of_input_pos,
-        columns=["motif", "score", "efficiency"]
-    )
-
-    return best_score_df.head(top_k)
-
-#--------------------Creates list of best scores overall--------------------# 
-
-def best_overall(motif_scores, all_motifs):
-
-    best_all = []
-
-    for motif, positions in motif_scores.items():
-
-        for residue, score in positions.items():
-
-            efficiency = all_motifs[motif]
-            best_all.append((motif, score, efficiency, residue))
-    
-    best_all.sort(key=lambda x: x[1], reverse = True)
-    best_df = pd.DataFrame(
-        best_all,
-        columns=["motif", "score", "efficiency", "residue"]
-    )
-    
-    return best_df.head(top_k)
-
-#--------------------Creates list of best scores for F1--------------------# 
-
-def best_for_F1(motif_scores, ddg_per_motif, F1):
-
-    best_energy_F1 = []
-
-    for motif, positions, in motif_scores.items():
-
-        if motif == F1:
-
-            for residue, score in positions.items():
-
-                best_energy_F1.append((score, residue))
-                best_energy_F1.sort(key=lambda x: x[0], reverse = True)
-
-    best_F1 = []
-
-    for entry in best_energy_F1:
-
-        for motif2, positions in ddg_per_motif.items():
-        
-                if motif2 == F1:
-
-                    for position, values in positions.items():
-
-                        if position == entry[1]:
-
-                            best_F1.append((entry[0], entry[1], values))
-
-    best_F1_df = pd.DataFrame(
-        best_F1,
-        columns=["score", "residue", "ddg + sd"]
-    )
-
-    return best_F1_df.head(top_k)
-
-"""
-
-
-
