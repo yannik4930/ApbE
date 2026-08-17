@@ -36,6 +36,22 @@ recognition_motifs = {
 
 f2_motif = recognition_motifs["F2"]
 
+def create_output_folder(pdb, input_run_name = None):
+
+    pdb_id = pdb.stem
+
+    if input_run_name is None:
+        run_name = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+
+    else:
+        run_name = input_run_name.strip().replace(" ", "_")
+
+    output_dir = (BASE_DIR / "outputs" / pdb_id / run_name)
+
+    output_dir.mkdir(parents = True, exist_ok = True)
+
+    return output_dir
+
 
 def define_recognition_motif(input_motif):
     return recognition_motifs[input_motif]
@@ -240,10 +256,12 @@ def load_mutation_data(csv_file):
 
     return mutation_lookup
 
+
 #calculcates efficiency of mismatch w/o exp_data and then weighs it depending on the R2 
 def get_efficiency(matrix_value, a, b, R2):
     x = ((matrix_value - b)/a)*R2 
     return x
+
 
 #walks through mismatch_dict and assigns score to each window, depending on number of mismatches, existance of exp_data and substition matrices 
 def get_assessment_score(mismatch_dict, exp_data, position_scoring, recognition_motif):
@@ -1007,10 +1025,10 @@ def get_secstr_scores(simple_secstr_df, output_mode, recognition_motif):
                     "SecStr": window,
                 }
 
-        scores_df = pd.DataFrame.from_dict(
-            scores,
-            orient="index",
-        )
+    scores_df = pd.DataFrame.from_dict(
+        scores,
+        orient="index",
+    )
 
     return(scores_df)
 
@@ -1153,8 +1171,9 @@ def score_volumes(volume_dict):
 
         volume_scores[pos] = {
             "Volume Score": score,
-            "Occupied Volume": f"{round(atom_volume, 0)}/{round(sphere_volume, 0)} Å"
+            "Occupied Volume": f"{round(atom_volume, 0)}/{round(sphere_volume, 0)} Å\u00B3"
         }
+
 
     volumes_df = pd.DataFrame.from_dict(
         volume_scores,
@@ -1164,60 +1183,155 @@ def score_volumes(volume_dict):
     return volumes_df
 
 
-def make_combined_table(SS_per_motif, ES_per_motif, secstr_scores_df, volumes_df, input_motif):
+def make_combined_table(scorer_results, all_motifs, input_motif):
 
-    if input_motif == "F1":
-        volume_score_offset = 8
+    sequence_tables = scorer_results.get("sequence")
+    energy_tables = scorer_results.get("energy")
+    secstr_df = scorer_results.get("secstr")
+    volumes_df = scorer_results.get("volume")
+
+    final_tables = {}
+
+    if volumes_df is not None:
+
+        volume_offset = {
+            "F2": 6,  
+            "F1": 8,  
+        }[input_motif]
+
+        volumes_aligned = volumes_df.copy()
+        volumes_aligned.index = (
+            volumes_aligned.index - volume_offset
+        )
 
     else:
-        volume_score_offset = 6
+        volumes_aligned = None
 
-    final_output_dict = {}
+    for motif in all_motifs:
 
-    for motif, SS_df in SS_per_motif.items():
+        dataframes = []
 
-        if motif in ES_per_motif:
+        if (
+            sequence_tables is not None
+            and motif in sequence_tables
+        ):
+            dataframes.append(sequence_tables[motif])
+    
+        if (
+            energy_tables is not None
+            and motif in energy_tables
+        ):
+            dataframes.append(energy_tables[motif])
+            
+        if secstr_df is not None:
 
-            ES_df = ES_per_motif[motif]
+            dataframes.append(secstr_df)
+            
+        if volumes_df is not None:
 
-            combined_df = SS_df.join(ES_df, how = "left")
+            dataframes.append(volumes_aligned)
 
-            o_score = (combined_df["Sequence Score"] * combined_df["Energy Score"]).round(5)
+        if not dataframes:
+            continue
 
-        else:
-            combined_df = SS_df.copy()
-            o_score = float("nan")
+        combined_df = pd.concat(
+            dataframes,
+            axis=1,
+            join="outer",
+        )
 
-        combined_df = combined_df.join(secstr_scores_df, how = "left")
+        o_score = pd.Series(1.0, index=combined_df.index, dtype=float)
+        maximum_o_score = 1.0
 
-        secstr_factor = (
-            combined_df["SecStr Score"].where(
-                combined_df["SecStr Score"] > 0.8,
-                0.8,
+        if (
+            sequence_tables is not None
+            and "Sequence Score" in combined_df.columns
+        ):
+            o_score *= combined_df["Sequence Score"]
+
+        if (
+            energy_tables is not None
+            and "Energy Score" in combined_df.columns
+        ):
+            o_score *= combined_df["Energy Score"]
+
+        if (
+            secstr_df is not None
+            and "SecStr Score" in combined_df.columns
+        ):
+            secstr_factor = combined_df["SecStr Score"].apply(
+                lambda value: (
+                    1.5
+                    if value > 0.8
+                    else 0.8
+                    if pd.notna(value)
+                    else np.nan
+                )
             )
+
+            o_score *= secstr_factor
+            maximum_o_score *= 1.5
+
+        if (
+            volumes_aligned is not None
+            and "Volume Score" in combined_df.columns
+        ):
+
+            o_score *= combined_df["Volume Score"]
+
+
+        combined_df.insert(
+            0,
+            "O-Score", 
+            (
+                o_score
+                .div(maximum_o_score)
+                .clip(lower=0.0, upper=1.0)
+                .round(5)
+            ),
         )
 
-        #preparation of volumes_df index 
-        volumes_df_shifted = volumes_df.copy()
-        volumes_df_shifted.index = volumes_df_shifted.index - volume_score_offset
+        combined_df.index.name = "Pos"
 
-        combined_df = combined_df.join(
-            volumes_df_shifted,
-            how="left",
+        if "MM" in combined_df.columns:
+            combined_df["MM"] = combined_df["MM"].astype("Int64")
+
+        columns_to_end = [
+            "Window Sequence",
+            "Mismatch Details",
+        ]
+
+        for column in columns_to_end:
+            if column in combined_df.columns:
+                values = combined_df.pop(column)
+                combined_df[column] = values
+
+        efficiency = all_motifs[motif]
+
+        final_tables[(motif, efficiency)] = combined_df
+
+    output_tables = []
+
+    for (motif, efficiency), df in final_tables.items():
+
+        output_df = df.copy()
+        output_df.insert(0, "Efficiency", efficiency)
+        output_df.insert(0, "Motif", motif)
+
+        output_tables.append(output_df)
+    
+    if output_tables:
+        best_per_motif_df = pd.concat(output_tables)
+
+        best_per_motif_df.to_csv(
+            output_dir / "final.tsv",
+            sep="\t",
+            index=True,
+            index_label="Pos",
         )
 
-        o_score = (combined_df["Sequence Score"]* combined_df["Energy Score"]* secstr_factor * combined_df["Volume Score"])
-
-        o_score = (o_score / 1.5).round(5)
-
-        combined_df.insert(0, "O-Score", o_score)
-
-        combined_df = (combined_df.rename_axis("Pos").reset_index())
-
-        final_output_dict[motif] = combined_df
-        
-    return final_output_dict
-
+    return final_tables
+       
 
 def sort_output(final_tables, all_motifs, output_sorting, top_k):
 
@@ -1227,8 +1341,6 @@ def sort_output(final_tables, all_motifs, output_sorting, top_k):
         best_per_motif = {}
 
         for motif, residues_df in final_tables.items():
-
-            efficiency = all_motifs[motif]
 
             valid_df = residues_df.dropna(
                 subset=["O-Score"]
@@ -1242,47 +1354,47 @@ def sort_output(final_tables, all_motifs, output_sorting, top_k):
             if sorted_df.empty:
                 continue
 
-            best_per_motif[(motif, efficiency)] = sorted_df.head(top_k)
-
-        output_tables = []
-
-        for (motif, efficiency), df in best_per_motif.items():
-            output_df = df.copy()
-
-            output_df.insert(0, "Efficiency", efficiency)
-            output_df.insert(0, "Motif", motif)
-
-            output_tables.append(output_df)
-
-        if output_tables:
-            best_per_motif_df = pd.concat(output_tables)
-
-            best_per_motif_df.to_csv(
-                output_dir / "final.tsv",
-                sep="\t",
-                index=True,
-                index_label="Pos",
-            )
+            best_per_motif[(motif)] = sorted_df.head(top_k)
 
         return best_per_motif
+    
 
+#--------------------Scoring functions--------------------#
 
-def create_output_folder(pdb, input_run_name = None):
+def run_sequence_scorer(fasta_seq, all_motifs, window_size, exp_data, recognition_motif, output_mode):
 
-    pdb_id = pdb.stem
+    mismatch_dict = count_mismatches(fasta_seq, all_motifs, window_size)
+    a_scores_per_motif = get_assessment_score(mismatch_dict, exp_data, position_scoring, recognition_motif)
+    SS_per_motif = make_SS_output_tables_per_motif(a_scores_per_motif, output_mode)
 
-    if input_run_name is None:
-        run_name = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    return SS_per_motif
 
-    else:
-        run_name = input_run_name.strip().replace(" ", "_")
+def run_energy_scorer(alignment_tables, all_motifs, prepaired_pdb, output_dir, output_mode):
 
-    output_dir = (BASE_DIR / "outputs" / pdb_id / run_name)
+    rawMutEnergyList = make_rawMutEnergyList(BASE_DIR, output_dir, prepaired_pdb, foldx_path, far_enough_res, far_enough_zone)
+    MutEnergyList = get_MutEnergyList(rawMutEnergyList)
+    ddg_per_motif = get_ddgs(alignment_tables, all_motifs, MutEnergyList)
+    energy_scores_per_motif = get_energy_scores(ddg_per_motif)
+    ES_per_motif = make_ES_output_tables_per_motif(energy_scores_per_motif, output_mode)
 
-    output_dir.mkdir(parents = True, exist_ok = True)
+    return ES_per_motif
 
-    return output_dir
+def run_secstr_scorer(prepaired_pdb, fasta_seqs, pdb_seq, output_mode, recognition_motif):
 
+    secstr_df = getSecStr(prepaired_pdb, fasta_seqs, pdb_seq)
+    simple_secstr_df = simplify_secstr_output(secstr_df)
+    secstr_scores_df = get_secstr_scores(simple_secstr_df, output_mode, recognition_motif)
+
+    return secstr_scores_df
+
+def run_volume_scorer(prepaired_pdb, fasta_seqs, pdb_seq):
+
+    volumes_dict = get_volumes(prepaired_pdb, fasta_seqs, pdb_seq)
+    volumes_df = score_volumes(volumes_dict)
+
+    return volumes_df
+
+#--------------------Input arguments--------------------#
 
 def parse_args():
 
@@ -1308,6 +1420,14 @@ def parse_args():
     parser.add_argument(
         "--run_name",
         help= "Specify name of run"        
+    )
+
+    parser.add_argument(
+        "--scorers",
+        nargs="+",
+        choices=SCORERS,
+        default=SCORERS,
+        help="Scorers that should be applied. Options: 'sequence', 'energy', 'secstr' 'volume'. Without further specification all are applied.",
     )
 
     parser.add_argument(
@@ -1343,6 +1463,13 @@ def parse_args():
 
 if __name__ == "__main__":
 
+    SCORERS = (
+        "sequence",
+        "energy",
+        "secstr",
+        "volume",
+    )
+
     #Arguments
     
     args = parse_args()
@@ -1354,6 +1481,7 @@ if __name__ == "__main__":
     output_sorting = args.output_sorting
     relevant_positions = args.positions
     input_run_name = args.run_name
+    selected_scorers = args.scorers
 
     #Pandas settings
 
@@ -1390,34 +1518,25 @@ if __name__ == "__main__":
     pdb_for_name = Path(pdb)
     prepaired_pdb = output_dir/f"{pdb_for_name.stem}_prepaired.pdb"
 
-    #Sequence scoring
+    #Modular scoring
 
-    mismatch_dict = count_mismatches(fasta_seq, all_motifs, window_size)
-    a_scores_per_motif = get_assessment_score(mismatch_dict, exp_data, position_scoring, recognition_motif)
-    SS_per_motif = make_SS_output_tables_per_motif(a_scores_per_motif, output_mode)
+    scorer_results = {}
 
-    #Energy calculation and scoring 
+    if "sequence" in selected_scorers:
+        scorer_results["sequence"] = run_sequence_scorer(fasta_seq, all_motifs, window_size, exp_data, recognition_motif, output_mode)
 
-    rawMutEnergyList = make_rawMutEnergyList(BASE_DIR, output_dir, prepaired_pdb, foldx_path, far_enough_res, far_enough_zone)
-    MutEnergyList = get_MutEnergyList(rawMutEnergyList)
-    ddg_per_motif = get_ddgs(alignment_tables, all_motifs, MutEnergyList)
-    energy_scores_per_motif = get_energy_scores(ddg_per_motif)
-    ES_per_motif = make_ES_output_tables_per_motif(energy_scores_per_motif, output_mode)
+    if "energy" in selected_scorers:
+        scorer_results["energy"] = run_energy_scorer(alignment_tables, all_motifs, prepaired_pdb, output_dir, output_mode)
 
-    #Secondary Structure Scoring
+    if "secstr" in selected_scorers:
+        scorer_results["secstr"] = run_secstr_scorer(prepaired_pdb, fasta_seqs, pdb_seq, output_mode, recognition_motif)
 
-    secstr_df = getSecStr(prepaired_pdb, fasta_seqs, pdb_seq)
-    simple_secstr_df = simplify_secstr_output(secstr_df)
-    secstr_scores_df = get_secstr_scores(simple_secstr_df, output_mode, recognition_motif)
-
-    #Volume Scoring
-
-    volumes_dict = get_volumes(prepaired_pdb, fasta_seqs, pdb_seq)
-    volumes_df = score_volumes(volumes_dict)
+    if "volume" in selected_scorers:
+        scorer_results["volume"] = run_volume_scorer(prepaired_pdb, fasta_seqs, pdb_seq)
 
     #Combination of all information in one table
 
-    final_tables = make_combined_table(SS_per_motif, ES_per_motif, secstr_scores_df, volumes_df, input_motif)
+    final_tables = make_combined_table(scorer_results, all_motifs, input_motif)
     final_sorted = sort_output(final_tables, all_motifs, output_sorting, top_k)
 
     for motif, motif_df in final_sorted.items():
@@ -1425,7 +1544,7 @@ if __name__ == "__main__":
         print("-" * 45)
         print(
             motif_df.to_string(
-                index=False,
+                index=True,
                 float_format=lambda value: f"{value:.4f}"
             )
         )
