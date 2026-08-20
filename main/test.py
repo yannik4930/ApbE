@@ -36,22 +36,6 @@ recognition_motifs = {
 
 f2_motif = recognition_motifs["F2"]
 
-def create_output_folder(pdb, input_run_name = None):
-
-    pdb_id = pdb.stem
-
-    if input_run_name is None:
-        run_name = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-
-    else:
-        run_name = input_run_name.strip().replace(" ", "_")
-
-    output_dir = (BASE_DIR / "outputs" / pdb_id / run_name)
-
-    output_dir.mkdir(parents = True, exist_ok = True)
-
-    return output_dir
-
 
 def define_recognition_motif(input_motif):
     return recognition_motifs[input_motif]
@@ -536,7 +520,7 @@ def save_alignment_tables(alignment_tables):
 
     for fasta_id, alignment_table in alignment_tables.items():
 
-        seq_name = fasta_id.lstrip(">").split("|")[0]
+        seq_name = fasta_id.lstrip(">").split("_")[0]
 
         output_file = output_dir / f"{seq_name}_align_table.tab"
 
@@ -574,7 +558,7 @@ def reassign_pdb_residues(pdb, best_per_fasta): #output in form of prepared .pdb
     yasara.LoadPDB(pdb)
     yasara.OligomerizeObj("1", center="Yes", instance="No") #removes non biological multimers (from crystallisation)
 
-    resultlist = yasara.ListMol("Obj 1") #creates list with all molecules of obj 1 
+    resultlist = yasara.ListMol("Protein Obj 1") #creates list with all molecules of obj 1 
     for i, a in enumerate(resultlist, start = 1): # assigns index to list of molecules 
         yasara.NameMol(f"Obj 1 Mol {a}, {i}") #replaces old mol name with index
 
@@ -582,8 +566,12 @@ def reassign_pdb_residues(pdb, best_per_fasta): #output in form of prepared .pdb
     first_res_of_pdb_seq = list(best_per_fasta.values())[0]["aligned_areas"][0][0][0] + 1 #takes first residue of pdb compared to fasta
 
     yasara.NumberRes(selector, first = first_res_of_pdb_seq) #Reassigns residue numbers of pdb based on numbers from alignment
-    prepared_pdb = output_dir / f"{pdb.stem}_prepared.pdb" #variable for place to save the prepared pdb
-    yasara.SavePDB("Obj 1", prepared_pdb)
+    prepared_pdb = output_dir / f"{pdb.stem}_aligned.pdb" #variable for place to save the prepared pdb
+    yasara.SavePDB(
+        "Obj 1", 
+        prepared_pdb,
+        format="PDB3"
+    )
     
     return(prepared_pdb)
 
@@ -597,19 +585,46 @@ def repair_pdb(prepared_pdb, pdb):
     yasara.LoadPDB(prepared_pdb)
     yasara.CleanAll()
     yasara.OptHydAll(method = "Yasara")
-    prepaired_pdb = output_dir/f"{pdb.stem}_prepaired.pdb"
-    yasara.SavePDB("Obj 1", prepaired_pdb)
+    prepaired_pdb = output_dir/f"{pdb.stem}_prepared.pdb"
+    yasara.SavePDB(
+        "Obj 1",
+        prepaired_pdb,
+        format="PDB3"
+    )
     os.remove(prepared_pdb)
 
 #--------------------Execute pyFRESCO to get ddG of all possible mutations and prepares resulting rawMutEnergyList--------------------#
 
-def make_rawMutEnergyList(work_dir, output_dir, prepaired_pdb, foldx_path, far_enough_res, far_enough_zone):
+def make_rawMutEnergyList(work_dir, output_dir, prepaired_pdb, foldx_path, far_enough_res, far_enough_zone, reuse_mutational_data, pdb):
 
-    selection_tab = output_dir / f"{prepaired_pdb.stem}.tab"
+    energy_dir = create_energy_output_folder(output_dir)
 
-    shutil.copy(work_dir / "DistributeFoldx.py", output_dir / "DistributeFoldx.py")
-    shutil.copy(work_dir / "submit_fresco.sh", output_dir / "submit_fresco.sh")
-    shutil.copy(work_dir / "fresco_job.sh", output_dir / "fresco_job.sh")
+    final_mutation_list = (energy_dir / "MutationEnergies_CompleteList.tab")
+
+    if reuse_mutational_data:
+
+        if (
+            final_mutation_list.is_file()
+            and final_mutation_list.stat().st_size > 0
+        ):
+            print(
+                "Existing mutation energies will be reused."
+            )
+            return final_mutation_list
+
+        raise FileNotFoundError(
+            "Mutational data should be reused, but no "
+            "valid MutationEnergies_CompleteList.tab "
+            f"was found in {energy_dir}."
+        )
+
+    selection_tab = energy_dir / f"{prepaired_pdb.stem}.tab"
+
+    shutil.copy(work_dir / "DistributeFoldx.py", energy_dir / "DistributeFoldx.py")
+    shutil.copy(work_dir / "submit_fresco.sh", energy_dir / "submit_fresco.sh")
+    shutil.copy(work_dir / "fresco_job.sh", energy_dir / "fresco_job.sh")
+
+    shutil.copy(output_dir / f"{pdb.stem}_prepaired.pdb", energy_dir / f"{pdb.stem}_prepaired.pdb")
 
     far_enough_command = [
         sys.executable, 
@@ -638,12 +653,12 @@ def make_rawMutEnergyList(work_dir, output_dir, prepaired_pdb, foldx_path, far_e
         f"{prepaired_pdb.stem}.tab",
         "500",
         foldx_path
-    ], cwd = output_dir, check = True)
+    ], cwd = energy_dir, check = True)
 
     subprocess.run(
         ["bash", 
         "submit_fresco.sh"
-    ], cwd = output_dir, check = True)
+    ], cwd = energy_dir, check = True)
 
     subprocess.run([
         sys.executable, 
@@ -651,9 +666,34 @@ def make_rawMutEnergyList(work_dir, output_dir, prepaired_pdb, foldx_path, far_e
         "Phase2",
         prepaired_pdb.name,
         "-5"
-    ], cwd = output_dir, check = True)
+    ], cwd = energy_dir, check = True)
 
-    return output_dir / "MutationEnergies_CompleteList.tab"
+    if (
+        not final_mutation_list.is_file()
+        or final_mutation_list.stat().st_size == 0
+    ):
+        raise RuntimeError(
+            "FoldX Phase2 did not create a valid "
+            "MutationEnergies_CompleteList.tab"
+        )
+
+    """
+    for path in output_dir.iterdir():
+
+            directory_number = path.name.removeprefix(
+                "Subdirectory"
+            )
+
+            if (
+                path.is_dir()
+                and path.name.startswith("Subdirectory")
+                and directory_number.isdigit()
+            ):
+                shutil.rmtree(path)
+                print(f"Deleted {path.name}")
+    """
+    
+    return energy_dir / "MutationEnergies_CompleteList.tab"
 
 
 def get_MutEnergyList(rawMutEnergyList):
@@ -746,7 +786,7 @@ def get_ddgs(alignment_tables, all_motifs, MutEnergyList):
                 
                 #pos+1 so that output shows biological residue number instead of position in python string
                 ddg_per_position[pos+1] = {
-                    "ddG": round(sum(mut["ddG"] for mut in mutations), 4),
+                    "ddG": round(sum(abs(mut["ddG"]) for mut in mutations), 4),
                     "sd": round(sum(mut["sd"] for mut in mutations), 4),
                 }
 
@@ -776,17 +816,17 @@ def get_energy_scores(ddg_per_motif):
             ddg_sd = values["sd"]
 
             #scoring of ddg_values
-            if 0 < ddg_value < 5:
-                score = 1 - 0.04 * ddg_value
+            if 0 < ddg_value <= 20:
+                score = 1 - 0.01 * ddg_value
 
-            elif ddg_value > 5:
-                score = 0.5 + 0.3 * math.exp(-0.5 * (ddg_value - 5))
+            elif ddg_value > 20:
+                score = 0.5 + 0.3 * math.exp(-0.04 * (ddg_value - 20))
 
-            elif 0 > ddg_value > -5: 
-                score = 1 + 0.04 * ddg_value
+            elif 0 > ddg_value >= -20: 
+                score = 1 + 0.01 * ddg_value
 
-            elif ddg_value < -5: 
-                score = 0.5 + 0.3 * math.exp(0.5 * (ddg_value + 5))
+            elif ddg_value < -20: 
+                score = 0.5 + 0.3 * math.exp(0.04 * (ddg_value + 20))
 
             else:
                 score = 1
@@ -1072,8 +1112,8 @@ def get_volumes(prepaired_pdb, fasta_seqs, pdb_seq):
     parts = selector.split()
     obj_num = int(parts[1])
 
-    resnumber_list = yasara.ListRes(f"Protein Obj {obj_num}, Format=RESNUM")
-    residue_list = yasara.ListRes(f"Protein Obj {obj_num}, Format=RESName")
+    resnumber_list = yasara.ListRes(f"Protein {selector}, Format=RESNUM")
+    residue_list = yasara.ListRes(f"Protein {selector}, Format=RESName")
 
     residue_dict = {
         int(resnumber): residue_name
@@ -1087,6 +1127,8 @@ def get_volumes(prepaired_pdb, fasta_seqs, pdb_seq):
     volume_dict = {}
 
     for pos, residue in residue_dict.items():    
+
+        print(residue)
 
         if residue in ["Pro", "Gly"]:
 
@@ -1151,6 +1193,7 @@ def get_volumes(prepaired_pdb, fasta_seqs, pdb_seq):
 
     return volume_dict
 
+
 #--------------------Calculates scores out of the occupancy rates--------------------#
 
 def score_volumes(volume_dict):
@@ -1182,8 +1225,48 @@ def score_volumes(volume_dict):
 
     return volumes_df
 
+#________________________________OUTPUT MANAGEMENT__________________________________#
 
-def make_combined_table(scorer_results, all_motifs, input_motif):
+def create_output_folder(pdb, input_run_name = None):
+
+    pdb_id = pdb.stem
+
+    if input_run_name is None:
+        run_name = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+
+    else:
+        run_name = input_run_name.strip().replace(" ", "_")
+
+    output_dir = (BASE_DIR / "outputs" / pdb_id / run_name)
+
+    output_dir.mkdir(parents = True, exist_ok = True)
+
+    return output_dir
+
+def create_energy_output_folder(output_dir):
+
+    energy_dir = (output_dir / "pyFRESCO")
+    energy_dir.mkdir(parents = True, exist_ok = True)
+
+    return energy_dir
+
+def get_final_output_path(output_dir, reuse_mutational_data, pdb, input_run_name):
+
+    if not reuse_mutational_data:
+        return output_dir / f"{pdb.stem}_{input_run_name}_final.tsv"
+
+    reuse_number = 2
+
+    while True:
+
+        output_path = (output_dir / f"{pdb.stem}_{input_run_name}_final{reuse_number}.tsv")
+
+        if not output_path.exists():
+            return output_path
+
+        reuse_number += 1
+
+def make_combined_table(scorer_results, all_motifs, input_motif, final_output_path):
 
     sequence_tables = scorer_results.get("sequence")
     energy_tables = scorer_results.get("energy")
@@ -1239,6 +1322,8 @@ def make_combined_table(scorer_results, all_motifs, input_motif):
             axis=1,
             join="outer",
         )
+
+        combined_df = combined_df.loc[combined_df.index >= 1].copy()
 
         o_score = pd.Series(1.0, index=combined_df.index, dtype=float)
         maximum_o_score = 1.0
@@ -1324,7 +1409,7 @@ def make_combined_table(scorer_results, all_motifs, input_motif):
         best_per_motif_df = pd.concat(output_tables)
 
         best_per_motif_df.to_csv(
-            output_dir / "final.tsv",
+            final_output_path,
             sep="\t",
             index=True,
             index_label="Pos",
@@ -1332,34 +1417,30 @@ def make_combined_table(scorer_results, all_motifs, input_motif):
 
     return final_tables
        
+def sort_output(final_tables, all_motifs, top_k):
+    
+    best_per_motif = {}
 
-def sort_output(final_tables, all_motifs, output_sorting, top_k):
+    for motif, residues_df in final_tables.items():
 
-    #best_per_motif
-    if output_sorting == "best_per_motif":
+        valid_df = residues_df.dropna(
+            subset=["O-Score"]
+        )
 
-        best_per_motif = {}
+        sorted_df = valid_df.sort_values(
+            by = "O-Score",
+            ascending = False,
+        )
 
-        for motif, residues_df in final_tables.items():
+        if sorted_df.empty:
+            continue
 
-            valid_df = residues_df.dropna(
-                subset=["O-Score"]
-            )
+        best_per_motif[(motif)] = sorted_df.head(top_k)
 
-            sorted_df = valid_df.sort_values(
-                by = "O-Score",
-                ascending = False,
-            )
-
-            if sorted_df.empty:
-                continue
-
-            best_per_motif[(motif)] = sorted_df.head(top_k)
-
-        return best_per_motif
+    return best_per_motif
     
 
-#--------------------Scoring functions--------------------#
+#________________________________SCORING FUNCTIONS__________________________________#
 
 def run_sequence_scorer(fasta_seq, all_motifs, window_size, exp_data, recognition_motif, output_mode):
 
@@ -1369,9 +1450,9 @@ def run_sequence_scorer(fasta_seq, all_motifs, window_size, exp_data, recognitio
 
     return SS_per_motif
 
-def run_energy_scorer(alignment_tables, all_motifs, prepaired_pdb, output_dir, output_mode):
+def run_energy_scorer(alignment_tables, all_motifs, prepaired_pdb, output_dir, output_mode, reuse_mutational_data):
 
-    rawMutEnergyList = make_rawMutEnergyList(BASE_DIR, output_dir, prepaired_pdb, foldx_path, far_enough_res, far_enough_zone)
+    rawMutEnergyList = make_rawMutEnergyList(BASE_DIR, output_dir, prepaired_pdb, foldx_path, far_enough_res, far_enough_zone, reuse_mutational_data, pdb)
     MutEnergyList = get_MutEnergyList(rawMutEnergyList)
     ddg_per_motif = get_ddgs(alignment_tables, all_motifs, MutEnergyList)
     energy_scores_per_motif = get_energy_scores(ddg_per_motif)
@@ -1394,7 +1475,7 @@ def run_volume_scorer(prepaired_pdb, fasta_seqs, pdb_seq):
 
     return volumes_df
 
-#--------------------Input arguments--------------------#
+#________________________________INPUT__________________________________#
 
 def parse_args():
 
@@ -1423,6 +1504,12 @@ def parse_args():
     )
 
     parser.add_argument(
+        "--reuse_mutational_data", 
+        action = "store_true",  
+        help = "Pass this flag to reuse the mutational data from a previous run.\nImportant: Specify the run name whose data should be reused."
+    )
+
+    parser.add_argument(
         "--scorers",
         nargs="+",
         choices=SCORERS,
@@ -1434,13 +1521,7 @@ def parse_args():
         "--output_mode", 
         default = "default",
         choices = ["default", "min", "verbose"],
-    )
-
-    parser.add_argument(
-        "--output_sorting",
-        default = "best_per_motif",
-        choices = ["best_per_motif", "best_overall", "best_per_positions"],
-        help = "If output_sorting = best_per_positions, the positions argument becomes mandatory"
+        help = "Choose how detailed the output table is supposed to be.\nOptions: default, min, verbose"
     )
 
     parser.add_argument(
@@ -1449,17 +1530,12 @@ def parse_args():
         type = int,
     )
 
-    parser.add_argument(
-        "--positions",
-        type = int, 
-        nargs ="+",
-        help = "Name every position, of which you want the O-score"
-    )
-
     args = parser.parse_args()
 
     return args
 
+
+#________________________________MAIN__________________________________#
 
 if __name__ == "__main__":
 
@@ -1478,22 +1554,22 @@ if __name__ == "__main__":
     pdb = Path(args.pdb_file)
     top_k = args.top_k
     output_mode = args.output_mode
-    output_sorting = args.output_sorting
-    relevant_positions = args.positions
     input_run_name = args.run_name
     selected_scorers = args.scorers
+    reuse_mutational_data = args.reuse_mutational_data
 
     #Pandas settings
 
     pd.set_option("display.max_columns", None)
     pd.set_option("display.max_colwidth", None)
-    pd.set_option("display.width", 300)
+    pd.set_option("display.width", 1000)
 
     #General
 
     recognition_motif = define_recognition_motif(input_motif)
     window_size = len(recognition_motif)
     output_dir = create_output_folder(pdb, input_run_name)
+    final_output_path = get_final_output_path(output_dir, reuse_mutational_data, pdb, input_run_name)
 
     #Fasta sequence preparation
 
@@ -1526,7 +1602,7 @@ if __name__ == "__main__":
         scorer_results["sequence"] = run_sequence_scorer(fasta_seq, all_motifs, window_size, exp_data, recognition_motif, output_mode)
 
     if "energy" in selected_scorers:
-        scorer_results["energy"] = run_energy_scorer(alignment_tables, all_motifs, prepaired_pdb, output_dir, output_mode)
+        scorer_results["energy"] = run_energy_scorer(alignment_tables, all_motifs, prepaired_pdb, output_dir, output_mode, reuse_mutational_data)
 
     if "secstr" in selected_scorers:
         scorer_results["secstr"] = run_secstr_scorer(prepaired_pdb, fasta_seqs, pdb_seq, output_mode, recognition_motif)
@@ -1536,8 +1612,8 @@ if __name__ == "__main__":
 
     #Combination of all information in one table
 
-    final_tables = make_combined_table(scorer_results, all_motifs, input_motif)
-    final_sorted = sort_output(final_tables, all_motifs, output_sorting, top_k)
+    final_tables = make_combined_table(scorer_results, all_motifs, input_motif, final_output_path)
+    final_sorted = sort_output(final_tables, all_motifs, top_k)
 
     for motif, motif_df in final_sorted.items():
         print(f"\nMotif: {motif[0]}, Efficiency: {motif[1]}")
@@ -1549,4 +1625,4 @@ if __name__ == "__main__":
             )
         )
 
-   
+
