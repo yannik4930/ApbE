@@ -566,18 +566,18 @@ def reassign_pdb_residues(pdb, best_per_fasta): #output in form of prepared .pdb
     first_res_of_pdb_seq = list(best_per_fasta.values())[0]["aligned_areas"][0][0][0] + 1 #takes first residue of pdb compared to fasta
 
     yasara.NumberRes(selector, first = first_res_of_pdb_seq) #Reassigns residue numbers of pdb based on numbers from alignment
-    prepared_pdb = output_dir / f"{pdb.stem}_aligned.pdb" #variable for place to save the prepared pdb
+    aligned_pdb = output_dir / f"{pdb.stem}_aligned.pdb" #variable for place to save the prepared pdb
     yasara.SavePDB(
         "Obj 1", 
-        prepared_pdb,
+        aligned_pdb,
         format="PDB3"
     )
     
-    return(prepared_pdb)
+    return(aligned_pdb)
 
 #--------------------Fix protonation states--------------------#
 
-def repair_pdb(prepared_pdb, pdb):
+def prepare_pdb(prepared_pdb, pdb):
 
     pdb = Path(pdb)
 
@@ -593,38 +593,41 @@ def repair_pdb(prepared_pdb, pdb):
     )
     os.remove(prepared_pdb)
 
+    return prepaired_pdb
+
 #--------------------Execute pyFRESCO to get ddG of all possible mutations and prepares resulting rawMutEnergyList--------------------#
 
-def make_rawMutEnergyList(work_dir, output_dir, prepaired_pdb, foldx_path, far_enough_res, far_enough_zone, reuse_mutational_data, pdb):
+def make_rawMutEnergyList(work_dir, output_dir, prepaired_pdb, foldx_path, far_enough_res, far_enough_zone, reuse_run_name, pdb):
 
     energy_dir = create_energy_output_folder(output_dir)
+    o_energy_dir = old_energy_dir(pdb, reuse_run_name)
 
-    final_mutation_list = (energy_dir / "MutationEnergies_CompleteList.tab")
+    final_mutation_list = (o_energy_dir / "MutationEnergies_CompleteList.tab")
 
-    if reuse_mutational_data:
+    if reuse_run_name is not None:
 
-        if (
-            final_mutation_list.is_file()
-            and final_mutation_list.stat().st_size > 0
-        ):
-            print(
-                "Existing mutation energies will be reused."
+            if (
+                final_mutation_list.is_file()
+                and final_mutation_list.stat().st_size > 0
+            ):
+                print(
+                    "Existing mutation energies will be reused."
+                )
+                return final_mutation_list
+
+            raise FileNotFoundError(
+                "Mutational data should be reused, but no "
+                "valid MutationEnergies_CompleteList.tab "
+                f"was found in {energy_dir}."
             )
-            return final_mutation_list
-
-        raise FileNotFoundError(
-            "Mutational data should be reused, but no "
-            "valid MutationEnergies_CompleteList.tab "
-            f"was found in {energy_dir}."
-        )
 
     selection_tab = energy_dir / f"{prepaired_pdb.stem}.tab"
 
     shutil.copy(work_dir / "DistributeFoldx.py", energy_dir / "DistributeFoldx.py")
     shutil.copy(work_dir / "submit_fresco.sh", energy_dir / "submit_fresco.sh")
     shutil.copy(work_dir / "fresco_job.sh", energy_dir / "fresco_job.sh")
-
     shutil.copy(output_dir / f"{pdb.stem}_prepaired.pdb", energy_dir / f"{pdb.stem}_prepaired.pdb")
+    shutil.copy(o_energy_dir / "MutationEnergies_CompleteList.tab", o_energy_dir / "MutationEnergies_CompleteList.tab")
 
     far_enough_command = [
         sys.executable, 
@@ -677,7 +680,6 @@ def make_rawMutEnergyList(work_dir, output_dir, prepaired_pdb, foldx_path, far_e
             "MutationEnergies_CompleteList.tab"
         )
 
-    """
     for path in output_dir.iterdir():
 
             directory_number = path.name.removeprefix(
@@ -691,7 +693,6 @@ def make_rawMutEnergyList(work_dir, output_dir, prepaired_pdb, foldx_path, far_e
             ):
                 shutil.rmtree(path)
                 print(f"Deleted {path.name}")
-    """
     
     return energy_dir / "MutationEnergies_CompleteList.tab"
 
@@ -1126,9 +1127,7 @@ def get_volumes(prepaired_pdb, fasta_seqs, pdb_seq):
 
     volume_dict = {}
 
-    for pos, residue in residue_dict.items():    
-
-        print(residue)
+    for pos, residue in residue_dict.items():
 
         if residue in ["Pro", "Gly"]:
 
@@ -1237,7 +1236,7 @@ def create_output_folder(pdb, input_run_name = None):
     else:
         run_name = input_run_name.strip().replace(" ", "_")
 
-    output_dir = (BASE_DIR / "outputs" / pdb_id / run_name)
+    output_dir = (BASE_DIR / "output" / pdb_id / run_name)
 
     output_dir.mkdir(parents = True, exist_ok = True)
 
@@ -1250,21 +1249,21 @@ def create_energy_output_folder(output_dir):
 
     return energy_dir
 
-def get_final_output_path(output_dir, reuse_mutational_data, pdb, input_run_name):
+def old_energy_dir(pdb, reuse_run_name):
 
-    if not reuse_mutational_data:
-        return output_dir / f"{pdb.stem}_{input_run_name}_final.tsv"
+    pdb_id = pdb.stem
 
-    reuse_number = 2
+    o_energy_dir = (BASE_DIR / "output" / pdb_id / reuse_run_name / "pyFRESCO")
 
-    while True:
+    return o_energy_dir
 
-        output_path = (output_dir / f"{pdb.stem}_{input_run_name}_final{reuse_number}.tsv")
 
-        if not output_path.exists():
-            return output_path
+def get_final_output_path(output_dir, pdb, input_run_name):
 
-        reuse_number += 1
+    output_path = output_dir / f"{pdb.stem}_{input_run_name}_final.tsv"
+
+    return output_path
+
 
 def make_combined_table(scorer_results, all_motifs, input_motif, final_output_path):
 
@@ -1505,8 +1504,9 @@ def parse_args():
 
     parser.add_argument(
         "--reuse_mutational_data", 
-        action = "store_true",  
-        help = "Pass this flag to reuse the mutational data from a previous run.\nImportant: Specify the run name whose data should be reused."
+        type = str,
+        metavar = "run_name",
+        help = "Reuse mutational data from the specified run."
     )
 
     parser.add_argument(
@@ -1556,7 +1556,7 @@ if __name__ == "__main__":
     output_mode = args.output_mode
     input_run_name = args.run_name
     selected_scorers = args.scorers
-    reuse_mutational_data = args.reuse_mutational_data
+    reuse_run_name = args.reuse_mutational_data
 
     #Pandas settings
 
@@ -1569,7 +1569,7 @@ if __name__ == "__main__":
     recognition_motif = define_recognition_motif(input_motif)
     window_size = len(recognition_motif)
     output_dir = create_output_folder(pdb, input_run_name)
-    final_output_path = get_final_output_path(output_dir, reuse_mutational_data, pdb, input_run_name)
+    final_output_path = get_final_output_path(output_dir, pdb, input_run_name)
 
     #Fasta sequence preparation
 
@@ -1590,9 +1590,7 @@ if __name__ == "__main__":
     alignment_tables = concat_alignment_tables(best_per_fasta)
     save_alignment_tables(alignment_tables)
     prepared_pdb = reassign_pdb_residues(pdb, best_per_fasta) #Path to pdb with reassigned residues
-    repair_pdb(prepared_pdb, pdb)
-    pdb_for_name = Path(pdb)
-    prepaired_pdb = output_dir/f"{pdb_for_name.stem}_prepaired.pdb"
+    prepaired_pdb = prepare_pdb(prepared_pdb, pdb)
 
     #Modular scoring
 
@@ -1602,7 +1600,7 @@ if __name__ == "__main__":
         scorer_results["sequence"] = run_sequence_scorer(fasta_seq, all_motifs, window_size, exp_data, recognition_motif, output_mode)
 
     if "energy" in selected_scorers:
-        scorer_results["energy"] = run_energy_scorer(alignment_tables, all_motifs, prepaired_pdb, output_dir, output_mode, reuse_mutational_data)
+        scorer_results["energy"] = run_energy_scorer(alignment_tables, all_motifs, prepaired_pdb, output_dir, output_mode, reuse_run_name)
 
     if "secstr" in selected_scorers:
         scorer_results["secstr"] = run_secstr_scorer(prepaired_pdb, fasta_seqs, pdb_seq, output_mode, recognition_motif)
